@@ -31,7 +31,7 @@ from email.mime.multipart import MIMEMultipart
 from functools import wraps
 from flask import Flask, request, jsonify, session, redirect, url_for, send_file, make_response, Response, stream_with_context
 
-DB_PATH       = os.environ.get('DB_PATH', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cmms_nexus.db'))
+DB_PATH       = "cmms_nexus.db"
 APP_VERSION   = "9.0.0"
 APP_BUILD     = "2026-02-23"
 APP_CODENAME  = "Enterprise Mobile Edition"
@@ -656,7 +656,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Rate limiting dictionary (simple in-memory rate limiter)
 rate_limit_store = {}
-def rate_limit(max_requests=60, window_seconds=60):
+def rate_limit(max_requests=200, window_seconds=60):
     """Simple rate limiting decorator"""
     def decorator(f):
         @wraps(f)
@@ -809,7 +809,7 @@ def send_notification(user_id, type_, title, message, link=None):
 # ── AUTH ──────────────────────────────────────────────────────────────────────
 
 @app.route('/api/login', methods=['POST'])
-@rate_limit(max_requests=5, window_seconds=300)  # 5 attempts per 5 minutes
+@rate_limit(max_requests=20, window_seconds=300)  # 20 attempts per 5 minutes
 def login():
     data = request.json
     if not data.get('username') or not data.get('password'):
@@ -13533,12 +13533,9 @@ if __name__ == '__main__':
     print("✓ Database initialized")
     start_auto_backup_thread()
     print("✓ Auto-backup scheduler started")
-    port = int(os.environ.get('PORT', 5050))
-    is_render = os.environ.get('RENDER', False)
-    if not is_render:
-        def open_browser():
-            import time; time.sleep(1.0)
-            webbrowser.open(f'http://localhost:{port}')
-        threading.Thread(target=open_browser, daemon=True).start()
-    print(f"✓ Starting on http://0.0.0.0:{port}")
-    app.run(debug=False, port=port, host='0.0.0.0')
+    print("✓ Opening http://localhost:5050")
+    def open_browser():
+        import time; time.sleep(1.0)
+        webbrowser.open('http://localhost:5050')
+    threading.Thread(target=open_browser, daemon=True).start()
+    app.run(debug=False, port=5050, host='0.0.0.0')
