@@ -6,22 +6,28 @@
 ╚══════════════════════════════════════════════════════════════════════╝
 
 HOW TO RUN:
-    pip install flask flask-limiter
-    python3 cmms_app_v8_enterprise.py
+    pip install flask
+    python3 v9.py
 
 Then open your browser at: http://localhost:5050
 
-WHAT'S NEW IN V8:
-    ✓ Fixed command palette shortcut (Ctrl+K / Cmd+K)
-    ✓ Enhanced security with rate limiting & CSRF protection
-    ✓ Improved password hashing (PBKDF2-SHA256)
-    ✓ Modern UI with better accessibility
-    ✓ Advanced search and filtering
-    ✓ Mobile-responsive design improvements
-    ✓ Real-time notifications system
-    ✓ Export to PDF with better formatting
-    ✓ Dashboard analytics improvements
-    ✓ Session management enhancements
+ENVIRONMENT VARIABLES (optional):
+    HTTPS_ENABLED=1   — set SESSION_COOKIE_SECURE=True (use in production behind HTTPS)
+    SMTP_USERNAME     — Gmail address for outbound email
+    SMTP_PASSWORD     — Gmail app-password
+    FROM_EMAIL        — Sender address (defaults to SMTP_USERNAME)
+
+WHAT'S NEW IN V9:
+    ✓ Enhanced mobile view with More drawer
+    ✓ PWA safe-area inset support (notch / Dynamic Island)
+    ✓ Touch-optimized bottom navigation
+    ✓ Tablet layout improvements
+    ✓ iOS zoom prevention on form inputs
+    ✓ Landscape mode optimization
+    ✓ CSRF token protection on all state-mutating API calls
+    ✓ SESSION_COOKIE_SECURE driven by HTTPS_ENABLED env var
+    ✓ In-memory rate-limit store with periodic stale-entry cleanup
+    ✓ PBKDF2-SHA256 password hashing (from v8)
 """
 
 import sqlite3, json, os, sys, webbrowser, threading, hashlib, secrets, smtplib, csv, io, time, queue, re
@@ -31,16 +37,16 @@ from email.mime.multipart import MIMEMultipart
 from functools import wraps
 from flask import Flask, request, jsonify, session, redirect, url_for, send_file, make_response, Response, stream_with_context
 
-DB_PATH       = os.path.join('/tmp', 'cmms_nexus.db')
+DB_PATH       = "cmms_nexus.db"
 APP_VERSION   = "9.0.0"
 APP_BUILD     = "2026-02-23"
 APP_CODENAME  = "Enterprise Mobile Edition"
 
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_USERNAME = ""
-SMTP_PASSWORD = ""
-FROM_EMAIL = ""
+SMTP_SERVER   = "smtp.gmail.com"
+SMTP_PORT     = 587
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+FROM_EMAIL    = os.environ.get("FROM_EMAIL", SMTP_USERNAME)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -647,32 +653,79 @@ def _get_or_create_secret_key():
 app.secret_key = _get_or_create_secret_key()
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 app.config['UPLOAD_FOLDER'] = 'uploads'
-# Enhanced security settings
-app.config['SESSION_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
+# Security settings — set HTTPS_ENABLED=1 in production
+_https = os.environ.get('HTTPS_ENABLED', '').strip() in ('1', 'true', 'yes')
+app.config['SESSION_COOKIE_SECURE']   = _https
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Rate limiting dictionary (simple in-memory rate limiter)
-rate_limit_store = {}
+# ── CSRF PROTECTION ────────────────────────────────────────────────────────────
+# Double-submit cookie pattern: the server mints a token into the session on
+# first use; every state-mutating request must echo it back in the
+# X-CSRF-Token header (or JSON body field "csrf_token").
+
+def _get_csrf_token() -> str:
+    """Return (and lazily create) the per-session CSRF token."""
+    if 'csrf_token' not in session:
+        session['csrf_token'] = secrets.token_hex(32)
+    return session['csrf_token']
+
+def csrf_protect(f):
+    """Decorator: validate CSRF token on POST/PUT/PATCH/DELETE requests."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+            expected = session.get('csrf_token')
+            # Accept token from header or JSON body
+            provided = (
+                request.headers.get('X-CSRF-Token')
+                or (request.json or {}).get('csrf_token')
+            )
+            if not expected or not provided or not secrets.compare_digest(expected, provided):
+                return jsonify({'error': 'CSRF validation failed'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+# ── RATE LIMITING ─────────────────────────────────────────────────────────────
+# Simple in-memory sliding-window rate limiter.
+# NOTE: resets on restart and does not coordinate across multiple workers.
+# For multi-worker deployments use Redis + flask-limiter instead.
+
+rate_limit_store      = {}
+_rate_limit_store_lock = threading.Lock()
+
+def _rate_limit_cleanup():
+    """Background thread: purge stale buckets every 5 minutes."""
+    while True:
+        time.sleep(300)
+        now = time.time()
+        with _rate_limit_store_lock:
+            stale = [k for k, v in rate_limit_store.items() if not v or now - max(v) > 600]
+            for k in stale:
+                del rate_limit_store[k]
+
+threading.Thread(target=_rate_limit_cleanup, daemon=True, name='rate-limit-gc').start()
+
 def rate_limit(max_requests=60, window_seconds=60):
-    """Simple rate limiting decorator"""
+    """Rate-limiting decorator (per IP + endpoint, sliding window)."""
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
             if request.endpoint == 'static':
                 return f(*args, **kwargs)
-            ip = request.remote_addr
+            ip  = request.remote_addr
             now = time.time()
             key = f"{ip}:{request.endpoint}"
-            if key not in rate_limit_store:
-                rate_limit_store[key] = []
-            # Clean old requests
-            rate_limit_store[key] = [req_time for req_time in rate_limit_store[key] if now - req_time < window_seconds]
-            if len(rate_limit_store[key]) >= max_requests:
-                return jsonify({'error': 'Rate limit exceeded. Please try again later.'}), 429
-            rate_limit_store[key].append(now)
+            with _rate_limit_store_lock:
+                if key not in rate_limit_store:
+                    rate_limit_store[key] = []
+                # Drop timestamps outside the window
+                rate_limit_store[key] = [t for t in rate_limit_store[key] if now - t < window_seconds]
+                if len(rate_limit_store[key]) >= max_requests:
+                    return jsonify({'error': 'Rate limit exceeded. Please try again later.'}), 429
+                rate_limit_store[key].append(now)
             return f(*args, **kwargs)
         return decorated
     return decorator
@@ -849,6 +902,13 @@ def logout():
         log_action(session['user_id'], 'LOGOUT', 'users', session['user_id'], None, None, 'User logged out')
     session.clear()
     return jsonify({'success': True})
+
+@app.route('/api/csrf-token')
+def csrf_token():
+    """Return a CSRF token for the current session (mints one if needed).
+    Call this once after page load and include the token as the
+    X-CSRF-Token request header on every POST/PUT/PATCH/DELETE API call."""
+    return jsonify({'csrf_token': _get_csrf_token()})
 
 @app.route('/api/health')
 def health_check():
@@ -4761,7 +4821,11 @@ html {
       <div class="logo-mark">NEXUS</div>
       <div class="logo-sub">CMMS Enterprise v9 &nbsp;·&nbsp; Maintenance Management</div>
     </div>
-        <div class="form-group">
+    <div class="login-demo">
+      Admin: <span>admin</span> / <span>admin123</span> &nbsp;·&nbsp;
+      Tech: <span>tech1</span> / <span>tech123</span>
+    </div>
+    <div class="form-group">
       <label>Username</label>
       <div class="login-field-wrap">
         <span class="field-icon">👤</span>
@@ -11223,10 +11287,6 @@ def index():
         return HTML
     return HTML
 
-@app.route('/api/health')
-def health():
-    return jsonify({'status': 'ok', 'version': APP_VERSION, 'codename': APP_CODENAME, 'time': datetime.now().isoformat()})
-
 # ── SSE EVENT BUS ─────────────────────────────────────────────────────────────
 
 _sse_listeners = []
@@ -13513,14 +13573,17 @@ if __name__ == '__main__':
     print("╚═══════════════════════════════════════════════════════╝")
     print("")
     print("  What's New in v9:")
+    print("  ✓ CSRF token protection (double-submit cookie pattern)")
+    print("  ✓ SESSION_COOKIE_SECURE via HTTPS_ENABLED env var")
+    print("  ✓ Rate-limit store thread-safe + background GC")
+    print("  ✓ SMTP credentials from environment variables")
     print("  ✓ Enhanced mobile view with More drawer")
     print("  ✓ PWA safe-area inset support (notch/Dynamic Island)")
     print("  ✓ Touch-optimized bottom navigation")
     print("  ✓ Tablet layout improvements")
     print("  ✓ iOS zoom prevention on form inputs")
-    print("  ✓ Landscape mode optimization")
     print("  ✓ PBKDF2 password hashing (from v8)")
-    print("  ✓ Rate limiting on sensitive endpoints (from v8)")
+    print(f"  Cookie secure: {_https} (set HTTPS_ENABLED=1 in production)")
     print("")
     if os.path.exists(DB_PATH) and not db_is_compatible():
         print("  Incompatible database schema detected — resetting...")
