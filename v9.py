@@ -656,7 +656,7 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Rate limiting dictionary (simple in-memory rate limiter)
 rate_limit_store = {}
-def rate_limit(max_requests=200, window_seconds=60):
+def rate_limit(max_requests=60, window_seconds=60):
     """Simple rate limiting decorator"""
     def decorator(f):
         @wraps(f)
@@ -809,7 +809,7 @@ def send_notification(user_id, type_, title, message, link=None):
 # ── AUTH ──────────────────────────────────────────────────────────────────────
 
 @app.route('/api/login', methods=['POST'])
-@rate_limit(max_requests=20, window_seconds=300)  # 20 attempts per 5 minutes
+@rate_limit(max_requests=5, window_seconds=300)  # 5 attempts per 5 minutes
 def login():
     data = request.json
     if not data.get('username') or not data.get('password'):
@@ -6248,6 +6248,13 @@ async function api(method, path, body) {
       headers: {'Content-Type': 'application/json'},
       body: body ? JSON.stringify(body) : undefined,
     });
+    const contentType = r.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      if (r.status === 503 || r.status === 502) {
+        throw new Error('Server is starting up — please wait 30 seconds and try again.');
+      }
+      throw new Error('Server error (' + r.status + ') — please refresh and try again.');
+    }
     const j = await r.json();
     if (!r.ok && !j.success) throw new Error(j.error || j.message || 'Request failed');
     return j;
