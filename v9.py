@@ -1752,7 +1752,11 @@ def get_pm_schedule(pm_id):
 @app.route('/api/pm-schedules', methods=['POST'])
 @login_required
 def create_pm_schedule():
-    data = request.json
+    data = request.json or {}
+    # Accept either 'title' or 'name' from the frontend
+    title = data.get('title') or data.get('name')
+    if not title:
+        return jsonify({'success': False, 'error': 'title is required'}), 400
     checklist = data.get('checklist', '[]')
     if isinstance(checklist, list):
         checklist = json.dumps(checklist)
@@ -1761,7 +1765,7 @@ def create_pm_schedule():
     c.execute("""INSERT INTO pm_schedules (title,asset_id,description,frequency,frequency_value,
         next_due,assigned_to,estimated_hours,estimated_cost,checklist,safety_instructions,requires_shutdown)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-    (data['title'], data.get('asset_id'), data.get('description'),
+    (title, data.get('asset_id'), data.get('description'),
      data.get('frequency', 'monthly'), data.get('frequency_value', 1),
      data.get('next_due'), data.get('assigned_to'), data.get('estimated_hours'),
      data.get('estimated_cost'), checklist, data.get('safety_instructions'), data.get('requires_shutdown', 0)))
@@ -1773,7 +1777,10 @@ def create_pm_schedule():
 @app.route('/api/pm-schedules/<int:pm_id>', methods=['PUT'])
 @login_required
 def update_pm_schedule(pm_id):
-    data = request.json
+    data = request.json or {}
+    title = data.get('title') or data.get('name')
+    if not title:
+        return jsonify({'success': False, 'error': 'title is required'}), 400
     checklist = data.get('checklist', '[]')
     if isinstance(checklist, list):
         checklist = json.dumps(checklist)
@@ -1781,7 +1788,7 @@ def update_pm_schedule(pm_id):
     conn.execute("""UPDATE pm_schedules SET title=?,asset_id=?,description=?,frequency=?,frequency_value=?,
         next_due=?,assigned_to=?,estimated_hours=?,estimated_cost=?,checklist=?,safety_instructions=?,
         requires_shutdown=?,active=? WHERE id=?""",
-    (data['title'], data.get('asset_id'), data.get('description'), data.get('frequency'),
+    (title, data.get('asset_id'), data.get('description'), data.get('frequency'),
      data.get('frequency_value'), data.get('next_due'), data.get('assigned_to'),
      data.get('estimated_hours'), data.get('estimated_cost'), checklist,
      data.get('safety_instructions'), data.get('requires_shutdown', 0), data.get('active', 1), pm_id))
@@ -2318,9 +2325,26 @@ def get_budget():
 @login_required
 @admin_required
 def update_budget():
-    data = request.json  # list of {year, month, budget, notes}
+    payload = request.json
     conn = get_db()
-    for row in data:
+    # Accept two shapes:
+    #   1. List of month rows: [{year, month, budget, notes}, ...]
+    #   2. Legacy flat object: {annual_budget: N}  — spread equally across all 12 months
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict) and 'months' in payload:
+        rows = payload['months']
+    elif isinstance(payload, dict) and 'annual_budget' in payload:
+        # Distribute evenly across the current year's 12 months
+        monthly = round(float(payload['annual_budget']) / 12, 2)
+        year = datetime.now().year
+        rows = [{'year': year, 'month': m, 'budget': monthly, 'notes': ''} for m in range(1, 13)]
+    else:
+        conn.close()
+        return jsonify({'success': False, 'error': 'Expected a list of month rows or {annual_budget: N}'}), 400
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
         conn.execute("""INSERT INTO maintenance_budget (year, month, budget_amount, notes, updated_at)
             VALUES (?,?,?,?,datetime('now'))
             ON CONFLICT(year,month) DO UPDATE SET budget_amount=excluded.budget_amount,
@@ -11482,11 +11506,22 @@ self.addEventListener('notificationclick', e => {
 @app.route('/api/mobile/sync-offline', methods=['POST'])
 @login_required
 def sync_offline_wo():
-    """Accept batched offline work orders created while disconnected."""
-    items = request.json or []
+    """Accept batched offline work orders created while disconnected.
+    Accepts either a bare list:  [{...}, ...]
+    or a wrapped object:          {"actions": [{...}, ...]}
+    """
+    payload = request.json
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        items = payload.get('actions') or payload.get('items') or []
+    else:
+        items = []
     created = []
     for item in items:
-        item['offline_id'] = item.get('offline_id', '')
+        if not isinstance(item, dict):
+            created.append({'error': 'invalid item (expected object)', 'item': str(item)[:80]})
+            continue
         wo_num = generate_wo_number()
         conn = get_db()
         c = conn.cursor()
