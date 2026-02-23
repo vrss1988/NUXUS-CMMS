@@ -31,7 +31,7 @@ from email.mime.multipart import MIMEMultipart
 from functools import wraps
 from flask import Flask, request, jsonify, session, redirect, url_for, send_file, make_response, Response, stream_with_context
 
-DB_PATH       = "cmms_nexus.db"
+DB_PATH       = os.path.join('/tmp', 'cmms_nexus.db')
 APP_VERSION   = "9.0.0"
 APP_BUILD     = "2026-02-23"
 APP_CODENAME  = "Enterprise Mobile Edition"
@@ -4761,11 +4761,7 @@ html {
       <div class="logo-mark">NEXUS</div>
       <div class="logo-sub">CMMS Enterprise v9 &nbsp;·&nbsp; Maintenance Management</div>
     </div>
-    <div class="login-demo">
-      Admin: <span>admin</span> / <span>admin123</span> &nbsp;·&nbsp;
-      Tech: <span>tech1</span> / <span>tech123</span>
-    </div>
-    <div class="form-group">
+        <div class="form-group">
       <label>Username</label>
       <div class="login-field-wrap">
         <span class="field-icon">👤</span>
@@ -6248,13 +6244,6 @@ async function api(method, path, body) {
       headers: {'Content-Type': 'application/json'},
       body: body ? JSON.stringify(body) : undefined,
     });
-    const contentType = r.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      if (r.status === 503 || r.status === 502) {
-        throw new Error('Server is starting up — please wait 30 seconds and try again.');
-      }
-      throw new Error('Server error (' + r.status + ') — please refresh and try again.');
-    }
     const j = await r.json();
     if (!r.ok && !j.success) throw new Error(j.error || j.message || 'Request failed');
     return j;
