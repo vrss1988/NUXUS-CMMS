@@ -13,9 +13,20 @@ Then open your browser at: http://localhost:5050
 
 ENVIRONMENT VARIABLES (optional):
     HTTPS_ENABLED=1   — set SESSION_COOKIE_SECURE=True (use in production behind HTTPS)
+    PORT              — port to listen on (default 5050; Render sets this automatically)
+    RENDER=1          — suppresses browser auto-open (Render sets this automatically)
     SMTP_USERNAME     — Gmail address for outbound email
     SMTP_PASSWORD     — Gmail app-password
     FROM_EMAIL        — Sender address (defaults to SMTP_USERNAME)
+
+DEPLOYING ON RENDER:
+    1. Push this file to a GitHub repo
+    2. Create a new Web Service on render.com, point it at the repo
+    3. Build command:  pip install flask
+    4. Start command:  gunicorn v9:app
+    5. Set env vars:   HTTPS_ENABLED=1  (Render provides HTTPS automatically)
+    6. Add a Disk:     Mount path /data, then set DB_PATH=/data/cmms_nexus.db
+       (without a persistent disk the SQLite file is lost on every redeploy)
 
 WHAT'S NEW IN V9:
     ✓ Enhanced mobile view with More drawer
@@ -30,14 +41,14 @@ WHAT'S NEW IN V9:
     ✓ PBKDF2-SHA256 password hashing (from v8)
 """
 
-import sqlite3, json, os, sys, webbrowser, threading, hashlib, secrets, smtplib, csv, io, time, queue, re
+import sqlite3, json, os, sys, threading, hashlib, secrets, smtplib, csv, io, time, queue, re
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from functools import wraps
 from flask import Flask, request, jsonify, session, redirect, url_for, send_file, make_response, Response, stream_with_context
 
-DB_PATH       = "cmms_nexus.db"
+DB_PATH       = os.environ.get("DB_PATH", "cmms_nexus.db")
 APP_VERSION   = "9.0.0"
 APP_BUILD     = "2026-02-23"
 APP_CODENAME  = "Enterprise Mobile Edition"
@@ -820,11 +831,17 @@ def admin_required(f):
     return decorated
 
 def log_action(user_id, action, table_name, record_id, old_value=None, new_value=None, details=""):
+    try:
+        ip = request.remote_addr
+        ua = request.user_agent.string if request.user_agent else None
+    except RuntimeError:
+        # Called from outside a request context (background thread, startup, etc.)
+        ip = None
+        ua = 'system'
     conn = get_db()
     conn.execute("""INSERT INTO audit_log (user_id,action,table_name,record_id,old_value,new_value,details,ip_address,user_agent)
                     VALUES (?,?,?,?,?,?,?,?,?)""",
-                 (user_id, action, table_name, record_id, old_value, new_value, details,
-                  request.remote_addr, request.user_agent.string if request.user_agent else None))
+                 (user_id, action, table_name, record_id, old_value, new_value, details, ip, ua))
     conn.commit()
     conn.close()
 
@@ -13649,35 +13666,39 @@ def db_restore():
     })
 
 
+# ── STARTUP INIT (runs under both `python v9.py` AND gunicorn) ────────────────
+# Must be at module level — NOT inside `if __name__ == '__main__'` — so that
+# gunicorn (used on Render and other PaaS platforms) initialises the DB and
+# background threads when it imports this module as a WSGI app.
+
+def _startup():
+    if os.path.exists(DB_PATH) and not db_is_compatible():
+        print("[CMMS] Incompatible DB schema detected — resetting…", flush=True)
+        reset_db()
+    init_db()
+    print("[CMMS] Database initialised", flush=True)
+    start_auto_backup_thread()
+    print("[CMMS] Auto-backup scheduler started", flush=True)
+    print(f"[CMMS] v{APP_VERSION} ready  |  cookie_secure={_https}", flush=True)
+
+_startup()
+
 if __name__ == '__main__':
     print("╔═══════════════════════════════════════════════════════╗")
     print("║   NEXUS CMMS Enterprise v9.0 Mobile Edition          ║")
-    print("║   Security + UI + Features + Mobile View Enhanced    ║")
     print("╚═══════════════════════════════════════════════════════╝")
-    print("")
-    print("  What's New in v9:")
-    print("  ✓ CSRF token protection (double-submit cookie pattern)")
-    print("  ✓ SESSION_COOKIE_SECURE via HTTPS_ENABLED env var")
-    print("  ✓ Rate-limit store thread-safe + background GC")
-    print("  ✓ SMTP credentials from environment variables")
-    print("  ✓ Enhanced mobile view with More drawer")
-    print("  ✓ PWA safe-area inset support (notch/Dynamic Island)")
-    print("  ✓ Touch-optimized bottom navigation")
-    print("  ✓ Tablet layout improvements")
-    print("  ✓ iOS zoom prevention on form inputs")
-    print("  ✓ PBKDF2 password hashing (from v8)")
-    print(f"  Cookie secure: {_https} (set HTTPS_ENABLED=1 in production)")
-    print("")
-    if os.path.exists(DB_PATH) and not db_is_compatible():
-        print("  Incompatible database schema detected — resetting...")
-        reset_db()
-    init_db()
-    print("✓ Database initialized")
-    start_auto_backup_thread()
-    print("✓ Auto-backup scheduler started")
-    print("✓ Opening http://localhost:5050")
-    def open_browser():
-        import time; time.sleep(1.0)
-        webbrowser.open('http://localhost:5050')
-    threading.Thread(target=open_browser, daemon=True).start()
-    app.run(debug=False, port=5050, host='0.0.0.0')
+    # Respect the PORT env var (required by Render, Railway, Heroku, etc.)
+    _port = int(os.environ.get('PORT', 5050))
+    print(f"  Listening on http://0.0.0.0:{_port}")
+    print(f"  Cookie secure: {_https}  (set HTTPS_ENABLED=1 in production)")
+    # Only open a browser when running locally (no DISPLAY / headless guard)
+    if not os.environ.get('PORT') and not os.environ.get('RENDER'):
+        def _open_browser():
+            import time as _t; _t.sleep(1.0)
+            try:
+                import webbrowser as _wb
+                _wb.open(f'http://localhost:{_port}')
+            except Exception:
+                pass
+        threading.Thread(target=_open_browser, daemon=True).start()
+    app.run(debug=False, port=_port, host='0.0.0.0')
