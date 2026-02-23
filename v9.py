@@ -11287,6 +11287,54 @@ def index():
         return HTML
     return HTML
 
+# ── CATCH-ALL: serve SPA for any non-API path (e.g. deep-links, browser refresh) ──
+@app.route('/<path:path>')
+def catch_all(path):
+    # API routes that don't match a registered endpoint become a JSON 404,
+    # not the SPA — handled by the 404 error handler below.
+    if path.startswith('api/'):
+        from flask import abort
+        abort(404)
+    return HTML
+
+# ── JSON ERROR HANDLERS ───────────────────────────────────────────────────────
+# Flask's defaults return HTML; these ensure every error response is JSON so
+# the frontend never tries to parse "<!doctype html>" as JSON.
+
+@app.errorhandler(400)
+def err_400(e):
+    return jsonify({'error': 'Bad request', 'details': str(e)}), 400
+
+@app.errorhandler(401)
+def err_401(e):
+    return jsonify({'error': 'Unauthorized'}), 401
+
+@app.errorhandler(403)
+def err_403(e):
+    return jsonify({'error': 'Forbidden'}), 403
+
+@app.errorhandler(404)
+def err_404(e):
+    return jsonify({'error': 'Not found', 'path': request.path}), 404
+
+@app.errorhandler(405)
+def err_405(e):
+    return jsonify({'error': 'Method not allowed', 'method': request.method, 'path': request.path}), 405
+
+@app.errorhandler(413)
+def err_413(e):
+    return jsonify({'error': 'File too large', 'max_mb': app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)}), 413
+
+@app.errorhandler(429)
+def err_429(e):
+    return jsonify({'error': 'Rate limit exceeded. Please try again later.'}), 429
+
+@app.errorhandler(500)
+def err_500(e):
+    import traceback
+    print(f"[500] {request.method} {request.path}\n{traceback.format_exc()}")
+    return jsonify({'error': 'Internal server error'}), 500
+
 # ── SSE EVENT BUS ─────────────────────────────────────────────────────────────
 
 _sse_listeners = []
